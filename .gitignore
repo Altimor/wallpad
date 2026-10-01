@@ -1,0 +1,9 @@
+.build
+.router
+.wrangler
+build
+node_modules
+worker/public/
+worker/public/tv-remote.zip
+worker/public/version.txt
+worker/wrangler.toml

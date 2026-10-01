@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#000">
+<title>{{NAME}} · Wallpad</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #000; --pad: #1c1c1e; --pad-hi: #232325; --btn: #2c2c2e; --btn-press: #48484a;
+    --text: #f5f5f7; --muted: #8e8e93; --ok: #30d158; --warn: #ff9f0a; --bad: #ff453a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overscroll-behavior: none; }
+  body { font: 15px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+         display: flex; flex-direction: column; height: 100dvh; padding: max(14px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom)); gap: 18px; touch-action: none; }
+
+  header { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 28px; }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; transition: background 0.3s; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+
+  /* the clickpad: the whole surface is touch area, like the Apple TV remote's */
+  #pad { flex: 1 1 auto; min-height: 220px; border-radius: 28px; background: radial-gradient(120% 90% at 50% 0%, var(--pad-hi), var(--pad) 70%);
+         box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.08); position: relative; overflow: hidden; }
+  #pad .hint { position: absolute; inset: auto 0 18px; text-align: center; color: #636366; font-size: 13px; pointer-events: none; transition: opacity 0.6s; }
+  #pad .ripple { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(255,255,255,0.14);
+                 pointer-events: none; animation: ripple 0.35s ease-out forwards; }
+  @keyframes ripple { from { transform: scale(0.4); opacity: 1; } to { transform: scale(1.3); opacity: 0; } }
+
+  .row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; justify-items: center; }
+  .row.three { grid-template-columns: repeat(3, 1fr); }
+  .btn { width: 66px; height: 66px; border-radius: 50%; border: 0; background: var(--btn); color: var(--text); display: grid; place-items: center;
+         transition: background 0.12s, transform 0.12s; padding: 0; font: 600 15px/1 inherit; }
+  .btn.on, .btn:active { background: var(--btn-press); transform: scale(0.94); }
+  .btn svg { width: 26px; height: 26px; }
+  /* modifiers: tap = next action only, double-tap = locked (filled) */
+  .btn.mod { font: 400 27px/1 -apple-system, system-ui, sans-serif; position: relative; }
+  .btn.mod.armed { background: var(--btn-press); box-shadow: inset 0 0 0 2px rgba(255,255,255,0.55); }
+  .btn.mod.locked { background: var(--text); color: #000; }
+  .btn.mod.locked::after { content: ""; position: absolute; bottom: 9px; width: 4px; height: 4px; border-radius: 50%; background: #000; }
+  .label { font-size: 12px; color: var(--muted); text-align: center; margin-top: 6px; }
+  .cell { display: grid; justify-items: center; }
+
+  /* function keys sheet */
+  #fn { position: fixed; inset: auto 0 0; background: #111113; border-radius: 22px 22px 0 0; padding: 14px 18px max(18px, env(safe-area-inset-bottom));
+        transform: translateY(105%); transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 -10px 40px rgba(0,0,0,0.6); }
+  #fn.open { transform: none; }
+  #fn .grab { width: 36px; height: 5px; border-radius: 3px; background: #3a3a3c; margin: 0 auto 14px; }
+  .keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .key { height: 48px; border-radius: 12px; border: 0; background: var(--btn); color: var(--text); font: 500 15px/1 inherit; }
+  .key:active { background: var(--btn-press); }
+  .key.wide { grid-column: span 2; }
+
+  #kb { position: fixed; left: -100px; top: 0; width: 50px; height: 30px; opacity: 0; font-size: 16px; }   /* hidden, opens the iOS keyboard */
+
+  /* pairing: the 4-digit code shown on the TV */
+  #pair { position: fixed; inset: 0; background: var(--bg); display: grid; place-items: center; padding: 24px; text-align: center; }
+  #pair[hidden] { display: none; }
+  #pair h2 { font-size: 22px; margin: 0 0 8px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+  #pair p { margin: 0 auto 26px; color: var(--muted); max-width: 290px; text-wrap: pretty; }
+  .digits { position: relative; display: flex; gap: 12px; justify-content: center; }
+  .digit { width: 58px; height: 72px; border-radius: 16px; background: var(--pad); display: grid; place-items: center;
+           font: 600 34px/1 -apple-system, system-ui, sans-serif; font-variant-numeric: tabular-nums; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06); }
+  .digit.cur { box-shadow: inset 0 0 0 2px var(--text); }
+  #code { position: absolute; inset: 0; opacity: 0; font-size: 16px; width: 100%; -webkit-user-select: text; user-select: text; }
+  #pair .err { color: var(--bad); min-height: 20px; margin-top: 16px; font-size: 14px; }
+  .shake { animation: shake 0.35s; }
+  @keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+  @media (prefers-reduced-motion: reduce) { .shake { animation: none; } }
+
+  #status { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,0.88); text-align: center; padding: 24px; }
+  #status[hidden] { display: none; }
+  #status h2 { font-size: 21px; margin: 0 0 8px; font-weight: 600; text-wrap: balance; }
+  #status p { margin: 0 auto; color: var(--muted); max-width: 300px; text-wrap: pretty; }
+  #status button { margin-top: 18px; border: 0; border-radius: 999px; padding: 12px 24px; background: var(--btn); color: var(--text); font: 600 15px/1 inherit; }
+</style>
+</head>
+<body>
+  <header><span class="dot" id="dot"></span><h1>{{NAME}}</h1></header>
+
+  <div id="pad"><div class="hint" id="hint">Drag to move · Tap to click · Two fingers to scroll</div></div>
+
+  <div class="row three">
+    <div class="cell"><button class="btn mod" data-mod="ctrl" aria-label="Control">⌃</button><div class="label">control</div></div>
+    <div class="cell"><button class="btn mod" data-mod="alt" aria-label="Option">⌥</button><div class="label">option</div></div>
+    <div class="cell"><button class="btn mod" data-mod="cmd" aria-label="Command">⌘</button><div class="label">command</div></div>
+  </div>
+  <div class="row">
+    <div class="cell"><button class="btn" id="kbBtn" aria-label="Keyboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7 14h10"/></svg></button><div class="label">Keyboard</div></div>
+    <div class="cell"><button class="btn" data-key="voldown" data-repeat aria-label="Volume down"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12"/></svg></button><div class="label">Volume</div></div>
+    <div class="cell"><button class="btn" data-key="volup" data-repeat aria-label="Volume up"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 12h12M12 6v12"/></svg></button><div class="label">Volume</div></div>
+    <div class="cell"><button class="btn" id="fnBtn" aria-label="Function keys">Fn</button><div class="label">Keys</div></div>
+  </div>
+
+  <div id="fn" aria-hidden="true">
+    <div class="grab"></div>
+    <div class="keys">
+      <button class="key" data-key="f1">F1</button><button class="key" data-key="f2">F2</button><button class="key" data-key="f3">F3</button><button class="key" data-key="f4">F4</button>
+      <button class="key" data-key="f5">F5</button><button class="key" data-key="f6">F6</button><button class="key" data-key="f7">F7</button><button class="key" data-key="f8">F8</button>
+      <button class="key" data-key="f9">F9</button><button class="key" data-key="f10">F10</button><button class="key" data-key="f11">F11</button><button class="key" data-key="f12">F12</button>
+      <button class="key" data-key="mission">Mission Ctrl</button><button class="key" data-key="launchpad">Launchpad</button><button class="key" data-key="tab">Tab</button><button class="key" data-key="space">Space</button>
+      <button class="key" data-key="previous">⏮</button><button class="key" data-key="up" data-repeat>↑</button><button class="key" data-key="next">⏭</button><button class="key" data-key="return">Return</button>
+      <button class="key" data-key="left" data-repeat>←</button><button class="key" data-key="down" data-repeat>↓</button><button class="key" data-key="right" data-repeat>→</button><button class="key" data-key="esc">Esc</button>
+    </div>
+  </div>
+
+  <textarea id="kb" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false"></textarea>
+
+  <div id="pair" hidden><div>
+    <h2>Enter the code on the TV</h2>
+    <p>First time on this phone: type the 4 digits shown on the screen. Your phone is then remembered for 30 days.</p>
+    <div class="digits" id="digits">
+      <div class="digit"></div><div class="digit"></div><div class="digit"></div><div class="digit"></div>
+      <input id="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="4" aria-label="Pairing code">
+    </div>
+    <div class="err" id="pairErr"></div>
+  </div></div>
+
+  <div id="status" hidden><div><h2 id="sTitle"></h2><p id="sBody"></p><button id="sRetry">Try again</button></div></div>
+
+<script>
+(() => {
+  const token = location.hash.slice(1);
+  const $ = (id) => document.getElementById(id);
+  let ws, ready = false, retryTimer, stopped = false;
+
+  // ---- this phone's pairing (a server-set cookie lasts its full 30 days; localStorage is a fallback) ----
+  const readDevice = () => {
+    const c = document.cookie.match(/(?:^|; )wallpad_device=([^;]+)/);
+    if (c) return c[1];
+    try { return localStorage.getItem("wallpad_device") || ""; } catch { return ""; }
+  };
+  const saveDevice = (d) => {
+    fetch("/remember?d=" + encodeURIComponent(d), { method: "POST" }).catch(() => {});
+    try { localStorage.setItem("wallpad_device", d); } catch {}
+  };
+
+  // ---- connection ----
+  function connect() {
+    clearTimeout(retryTimer);
+    stopped = false;
+    $("dot").className = "dot";
+    try { ws = new WebSocket(`ws://${location.hostname}:{{WSPORT}}`); } catch { return fail(); }
+    ws.onopen = () => ws.send(JSON.stringify({ t: "auth", token, device: readDevice() }));
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.t === "ok") {
+        ready = true; $("dot").className = "dot ok"; $("status").hidden = true; $("pair").hidden = true; $("code").blur();
+        if (m.device) saveDevice(m.device);
+      }
+      if (m.t === "pair") showPair(m.wrong);
+      if (m.t === "denied") stop("This code isn’t valid", "Scan the QR code under the TV again.", false);
+      if (m.t === "locked") stop("Too many wrong codes", "Try again to get a new code on the TV.", true);
+      if (m.t === "replaced") stop("Someone else is pairing", "Another phone started pairing with this TV. Try again in a moment.", true);
+    };
+    ws.onclose = () => {
+      if (ready) { ready = false; $("dot").className = "dot bad"; }
+      if (!stopped) retryTimer = setTimeout(connect, 1500);
+    };
+    ws.onerror = () => { if (!stopped) fail(); };
+  }
+  function stop(title, body, retry) {   // no automatic reconnect: each one would put a new code on the TV
+    stopped = true; ready = false; $("pair").hidden = true; status(title, body, retry);
+  }
+  function fail() {
+    $("dot").className = "dot bad";
+    status("Can’t reach the TV", "Make sure you’re on the office Wi‑Fi, the same network as the TV.", true);
+  }
+  function status(title, body, retry) {
+    $("sTitle").textContent = title; $("sBody").textContent = body; $("sRetry").hidden = !retry; $("status").hidden = false;
+  }
+
+  // ---- pairing code entry ----
+  const code = $("code"), cells = [...document.querySelectorAll(".digit")];
+  const paint = () => cells.forEach((c, i) => { c.textContent = code.value[i] || ""; c.classList.toggle("cur", i === Math.min(code.value.length, 3)); });
+  function showPair(wrong) {
+    $("status").hidden = true; $("pair").hidden = false;
+    code.value = ""; paint();
+    $("pairErr").textContent = wrong ? "That’s not the code on the TV. Try again." : "";
+    if (wrong) { const d = $("digits"); d.classList.remove("shake"); void d.offsetWidth; d.classList.add("shake"); }
+    code.focus();
+  }
+  code.addEventListener("input", () => {
+    code.value = code.value.replace(/\D/g, "").slice(0, 4); paint();
+    if (code.value.length === 4 && ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "code", code: code.value }));
+  });
+  $("digits").addEventListener("touchend", (e) => { e.preventDefault(); code.focus(); }, { passive: false });
+  $("sRetry").onclick = () => { $("status").hidden = true; connect(); };
+  // modifiers: name -> "armed" (applies to the next action) or "locked" (until tapped off)
+  const mods = {};
+  const send = (o) => {
+    const held = Object.keys(mods);
+    if (held.length) o.mods = held;
+    if (ready && ws.readyState === 1) ws.send(JSON.stringify(o));
+  };
+  /// after a click, key, typed text, drag or scroll: drop the one-shot modifiers
+  const used = () => {
+    let changed = false;
+    for (const k in mods) if (mods[k] === "armed") { delete mods[k]; changed = true; }
+    if (changed) paintMods();
+  };
+  const paintMods = () => document.querySelectorAll("[data-mod]").forEach((b) => {
+    b.classList.toggle("armed", mods[b.dataset.mod] === "armed");
+    b.classList.toggle("locked", mods[b.dataset.mod] === "locked");
+  });
+  document.querySelectorAll("[data-mod]").forEach((b) => {
+    let lastTap = 0;
+    const tap = (e) => {
+      e.preventDefault();
+      const k = b.dataset.mod, now = performance.now(), quick = now - lastTap < 400;
+      lastTap = now;
+      if (quick) mods[k] = "locked";                  // double-tap locks
+      else if (mods[k]) delete mods[k];               // tap again turns it off
+      else mods[k] = "armed";
+      paintMods();
+    };
+    b.addEventListener("touchend", tap, { passive: false });
+    b.addEventListener("click", (e) => { if (e.detail === 0 || e.pointerType === "mouse") tap(e); });
+  });
+  if (!token) status("Scan the QR code", "Open this remote by scanning the code under the TV.", false); else connect();
+
+  // ---- trackpad ----
+  const pad = $("pad");
+  let touches = {}, start = 0, moved = 0, maxFingers = 0, holdTimer = null, dragging = false;
+  let pendingMove = { dx: 0, dy: 0 }, pendingScroll = { dx: 0, dy: 0 }, raf = 0, lastTap = 0;
+  const flush = () => {
+    raf = 0;
+    if (pendingMove.dx || pendingMove.dy) { send({ t: "move", dx: pendingMove.dx, dy: pendingMove.dy }); pendingMove = { dx: 0, dy: 0 }; }
+    if (pendingScroll.dx || pendingScroll.dy) { send({ t: "scroll", dx: pendingScroll.dx, dy: pendingScroll.dy }); pendingScroll = { dx: 0, dy: 0 }; }
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(flush); };
+  // pointer acceleration: slow drags are precise, fast flicks cross the TV
+  const accel = (d, dt) => { const v = Math.abs(d) / Math.max(dt, 1); return d * (1.4 + Math.min(v, 3) * 1.6); };
+  let lastT = 0;
+  function ripple(x, y) {
+    const r = document.createElement("div"); r.className = "ripple";
+    const b = pad.getBoundingClientRect(); r.style.left = (x - b.left) + "px"; r.style.top = (y - b.top) + "px";
+    pad.appendChild(r); setTimeout(() => r.remove(), 400);
+  }
+  pad.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    $("hint").style.opacity = 0;
+    for (const t of e.changedTouches) touches[t.identifier] = { x: t.clientX, y: t.clientY };
+    const n = Object.keys(touches).length;
+    if (n === 1) { start = performance.now(); moved = 0; maxFingers = 1; lastT = start;
+      // touch and hold, then drag = click-and-drag (select text, move windows)
+      holdTimer = setTimeout(() => { if (moved < 6) { dragging = true; send({ t: "down" }); pad.style.background = "var(--pad-hi)"; } }, 380);
+    }
+    maxFingers = Math.max(maxFingers, n);
+  }, { passive: false });
+  pad.addEventListener("touchmove", (e) => {
+    e.preventDefault();
+    const now = performance.now(), dt = now - lastT; lastT = now;
+    const list = [...e.touches];
+    let dx = 0, dy = 0;
+    for (const t of list) { const p = touches[t.identifier]; if (!p) continue; dx += t.clientX - p.x; dy += t.clientY - p.y; touches[t.identifier] = { x: t.clientX, y: t.clientY }; }
+    dx /= list.length; dy /= list.length;
+    moved += Math.abs(dx) + Math.abs(dy);
+    if (moved > 6) clearTimeout(holdTimer);
+    if (list.length >= 2) { pendingScroll.dx += dx * 2; pendingScroll.dy += dy * 2; }
+    else { pendingMove.dx += accel(dx, dt); pendingMove.dy += accel(dy, dt); }
+    schedule();
+  }, { passive: false });
+  const end = (e) => {
+    e.preventDefault();
+    for (const t of e.changedTouches) delete touches[t.identifier];
+    if (Object.keys(touches).length) return;
+    clearTimeout(holdTimer);
+    if (dragging) { flush(); send({ t: "up" }); dragging = false; pad.style.background = ""; used(); return; }
+    if (maxFingers >= 2 && moved >= 10) { flush(); used(); }   // a scroll counts as the action (⌃-scroll zooms)
+    const quick = performance.now() - start < 260 && moved < 10;
+    if (quick) {
+      const t = e.changedTouches[0]; ripple(t.clientX, t.clientY);
+      send({ t: "click", b: maxFingers >= 2 ? "right" : "left" });
+      used();
+      lastTap = performance.now();
+    }
+  };
+  pad.addEventListener("touchend", end, { passive: false });
+  pad.addEventListener("touchcancel", end, { passive: false });
+
+  // ---- buttons (hold to repeat volume and arrows) ----
+  document.querySelectorAll("[data-key]").forEach((b) => {
+    let rep;
+    const fire = () => send({ t: "key", k: b.dataset.key });
+    b.addEventListener("touchstart", (e) => { e.preventDefault(); b.classList.add("on"); fire();
+      if (b.hasAttribute("data-repeat")) rep = setTimeout(function again() { fire(); rep = setTimeout(again, 110); }, 420); }, { passive: false });
+    const stop = (e) => { e.preventDefault(); b.classList.remove("on"); clearTimeout(rep); used(); };
+    b.addEventListener("touchend", stop, { passive: false });
+    b.addEventListener("touchcancel", stop, { passive: false });
+    b.addEventListener("click", (e) => { if (e.pointerType === "mouse" || e.detail === 0) fire(); });   // desktop browsers
+  });
+
+  // ---- function keys sheet ----
+  const fn = $("fn");
+  const toggleFn = (open) => { fn.classList.toggle("open", open); fn.setAttribute("aria-hidden", !open); $("fnBtn").classList.toggle("on", open); };
+  $("fnBtn").addEventListener("touchend", (e) => { e.preventDefault(); toggleFn(!fn.classList.contains("open")); }, { passive: false });
+  $("fnBtn").addEventListener("click", () => toggleFn(!fn.classList.contains("open")));
+  pad.addEventListener("touchstart", () => toggleFn(false));
+
+  // ---- keyboard: a hidden field opens the iOS keyboard; what's typed goes to the TV ----
+  const kb = $("kb"), SENTINEL = "​";
+  kb.value = SENTINEL;
+  const openKb = (e) => { e.preventDefault(); kb.value = SENTINEL; kb.focus(); kb.setSelectionRange(1, 1); $("kbBtn").classList.add("on"); };
+  $("kbBtn").addEventListener("touchend", openKb, { passive: false });
+  $("kbBtn").addEventListener("click", openKb);
+  kb.addEventListener("blur", () => $("kbBtn").classList.remove("on"));
+  kb.addEventListener("beforeinput", (e) => {
+    e.preventDefault();
+    if (e.inputType === "insertText" || e.inputType === "insertReplacementText") send({ t: "text", s: e.data || "" });
+    else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph") send({ t: "key", k: "return" });
+    else if (e.inputType.startsWith("delete")) send({ t: "key", k: "backspace" });
+    kb.value = SENTINEL; kb.setSelectionRange(1, 1);
+    used();
+  });
+  kb.addEventListener("keydown", (e) => {   // hardware keyboards
+    const map = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right", Escape: "esc", Tab: "tab" };
+    if (map[e.key]) { e.preventDefault(); send({ t: "key", k: map[e.key] }); }
+  });
+})();
+</script>
+</body>
+</html>
