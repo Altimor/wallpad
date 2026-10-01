@@ -1,18 +1,15 @@
 #!/bin/bash
-# Installs Wallpad on a TV's Mac (scripts/install-command.sh prints the exact command):
-#   curl -fsSL <router>/install.sh | bash -s -- "Lobby TV" <one-time enrollment code>
-# Re-running it keeps the same QR code. After that the app updates itself.
+# Installs Wallpad on the Mac behind a TV:
+#   curl -fsSL https://github.com/__REPO__/releases/latest/download/install.sh | bash
+# Optional TV name (defaults to the Mac's name): ... | bash -s -- "Lobby TV". Re-running keeps the same QR code.
 set -euo pipefail
-NAME="${1:?usage: install.sh \"TV name\" <enrollment code>}"
-CODE="${2:?missing enrollment code}"
-R=__ROUTER__
+NAME="${1:-}"
 LABEL=__LABEL__
 APPS="$HOME/Applications"; APP="$APPS/Wallpad.app"; PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
-curl -fsSL "$R/wallpad.zip" -o "$TMP/app.zip"
+curl -fsSL "https://github.com/__REPO__/releases/latest/download/Wallpad.zip" -o "$TMP/app.zip"
 ditto -x -k "$TMP/app.zip" "$TMP/x"
-# only install what's signed for this app (same check the auto-updater does)
 codesign --verify --deep --strict "$TMP/x/Wallpad.app"
 
 # earlier versions were called "TV Remote"
@@ -21,8 +18,7 @@ rm -f "$HOME/Library/LaunchAgents/com.flocrivello.tv-remote.plist"; rm -rf "$APP
 
 launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
 mkdir -p "$APPS"; rm -rf "$APP"; mv "$TMP/x/Wallpad.app" "$APP"
-
-"$APP/Contents/MacOS/wallpad" setup --name "$NAME" --router "$R" --enroll "$CODE"
+if [ -n "$NAME" ]; then "$APP/Contents/MacOS/wallpad" setup --name "$NAME"; else "$APP/Contents/MacOS/wallpad" setup; fi
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 cat > "$PLIST" <<PL
@@ -40,8 +36,8 @@ PL
 launchctl bootstrap "gui/$UID" "$PLIST"
 
 echo
-echo "Installed. Two things left on this Mac:"
-echo "  1. Allow \"Wallpad\" in System Settings > Privacy & Security > Accessibility (opening it now)."
+echo "Installed. Last two steps:"
+echo "  1. Turn on Wallpad in System Settings > Privacy & Security > Accessibility (opening it now)."
 echo "  2. Print the QR card from the Desktop and stick it on the TV."
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
-open -R "$HOME/Desktop/$NAME Wallpad QR.png" || true
+open -R "$HOME/Desktop/"*" Wallpad QR.png" 2>/dev/null || true

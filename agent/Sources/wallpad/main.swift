@@ -1,29 +1,28 @@
 // Wallpad: lets a phone on the office Wi-Fi drive this Mac (the one plugged into a TV) like an
 // Apple TV remote: a big trackpad, a keyboard, modifier / media / function keys.
 //
-//   wallpad setup --name "Lobby TV" --enroll <code>   first run: registers the TV, writes the QR card
-//   wallpad qr                                         writes the printable QR card to the Desktop again
-//   wallpad                                            runs the agent (a LaunchAgent, see install.sh)
+//   wallpad setup [--name "Lobby TV"]   first run: creates the QR secret, writes the QR card to the Desktop
+//   wallpad qr                          writes the QR card again
+//   wallpad                             runs the agent (a LaunchAgent, see scripts/install.sh)
 //
-// The remote page is served on http://<this Mac>:8765, its WebSocket on :8766. Phones reach it through
-// <router>/t/<id>#<secret> (worker/), which this agent keeps up to date with its current local address,
-// so a printed code survives IP changes.
+// The QR code points at http://<this Mac>.local:8765/#<secret>. The .local name is announced on the network
+// by macOS itself (Bonjour), so printed codes keep working when the Mac's IP changes, and no server is needed.
 //
 // Security model:
 //   - the QR code holds a per-TV secret; without it the WebSocket accepts nothing
 //   - a phone seen for the first time must also type a 4-digit code shown on the TV (so a photo of the
 //     QR code isn't enough); it's then remembered for 30 days
-//   - each TV reports its address with its own key (the admin key is only used once, at setup)
-//   - self-updates are installed only if signed by the same developer team as the running app
+//   - self-updates (from GitHub Releases) are installed only if signed by the same developer team
 
 import AppKit
 import CommonCrypto
 import CoreImage
 import Network
 import Security
+import SystemConfiguration
 
-/// The router this build talks to (set by scripts/package.sh from WALLPAD_ROUTER).
-let bundledRouter = Bundle.main.object(forInfoDictionaryKey: "WallpadRouter") as? String
+/// Where updates come from (GitHub owner/repo, set by scripts/package.sh).
+let releasesRepo = Bundle.main.object(forInfoDictionaryKey: "WallpadRepo") as? String ?? "Altimor/wallpad"
 /// WALLPAD_HOME: a scratch home for testing (config + QR card go there instead of the real one)
 let home = ProcessInfo.processInfo.environment["WALLPAD_HOME"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser
 let supportDir = home.appendingPathComponent("Library/Application Support/Wallpad")
@@ -32,17 +31,11 @@ let devicesURL = supportDir.appendingPathComponent("devices.json")
 let pairingDays = 30.0
 
 struct Config: Codable {
-    var id: String
     var name: String
     var token: String
     var port: UInt16 = 8765
-    var worker: String
-    /// This TV's own key for reporting its address (from /api/register).
-    var tvKey: String?
-    /// Legacy: the shared admin key older installs kept; traded for a tvKey on start, then dropped.
-    var reportKey: String?
     var wsPort: UInt16 { port + 1 }
-    var qrURL: String { "\(worker)/t/\(id)#\(token)" }
+    var qrURL: String { "http://\(LAN.hostname):\(port)/#\(token)" }
 }
 
 func log(_ s: String) {
@@ -87,26 +80,6 @@ func saveConfig(_ c: Config) throws {
     let e = JSONEncoder(); e.outputFormatting = [.prettyPrinted, .sortedKeys]
     try e.encode(c).write(to: configURL, options: .atomic)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
-}
-
-/// POST /api/register with the admin key: the router issues this TV its own key.
-func register(_ c: Config, adminKey: String) -> String? {
-    guard let url = URL(string: "\(c.worker)/api/register") else { return nil }
-    var req = URLRequest(url: url)
-    req.httpMethod = "POST"
-    req.setValue("Bearer \(adminKey)", forHTTPHeaderField: "Authorization")
-    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": c.id])
-    let done = DispatchSemaphore(value: 0)
-    var key: String?
-    URLSession.shared.dataTask(with: req) { data, resp, _ in
-        if (resp as? HTTPURLResponse)?.statusCode == 200, let data,
-           let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { key = o["key"] as? String }
-        else { log("register failed: HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)") }
-        done.signal()
-    }.resume()
-    done.wait()
-    return key
 }
 
 // MARK: - paired phones
@@ -464,9 +437,15 @@ final class Server {
     }
 }
 
-// MARK: - reporting the current address to the router
+// MARK: - network
 
 enum LAN {
+    /// This Mac's Bonjour name, e.g. "Lobby-Mac-mini.local" (System Settings > General > Sharing > Local hostname).
+    static var hostname: String {
+        let name = SCDynamicStoreCopyLocalHostName(nil) as String? ?? Host.current().localizedName ?? "localhost"
+        return name + ".local"
+    }
+
     /// The Mac's LAN IPv4 (Wi-Fi or Ethernet), skipping loopback / link-local / VPN-ish interfaces.
     static func localIPv4() -> String? {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
@@ -487,45 +466,6 @@ enum LAN {
             if best == nil || rank < best!.rank { best = (rank, ip) }
         }
         return best?.ip
-    }
-}
-
-final class Reporter {
-    let config: Config
-    let monitor = NWPathMonitor()
-    var timer: Timer?
-    var lastIP: String?
-
-    init(config: Config) { self.config = config }
-
-    func start() {
-        monitor.pathUpdateHandler = { [weak self] _ in DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.report() } }
-        monitor.start(queue: .main)
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in self?.report() }
-        report()
-    }
-
-    /// Over IPv4 and IPv6 separately, so the router knows both public addresses of this network.
-    func report() {
-        guard let key = config.tvKey else { return }
-        guard let ip = LAN.localIPv4() else { log("no local address yet"); return }
-        if ip != lastIP { log("local address \(ip)"); lastIP = ip }
-        let body = try! JSONSerialization.data(withJSONObject: ["id": config.id, "name": config.name, "ip": ip, "port": config.port])
-        for family in ["-4", "-6"] {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
-            // the key goes through a header file on stdin, not argv (visible to every process in `ps`)
-            p.arguments = [family, "-s", "-m", "10", "-X", "POST", "-H", "@-",
-                           "-H", "Content-Type: application/json", "--data-binary", String(data: body, encoding: .utf8)!,
-                           "\(config.worker)/api/report"]
-            let stdin = Pipe()
-            p.standardInput = stdin
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { continue }
-            stdin.fileHandleForWriting.write(Data("Authorization: Bearer \(key)\n".utf8))
-            try? stdin.fileHandleForWriting.close()
-        }
     }
 }
 
@@ -557,7 +497,7 @@ enum CodeSign {
     }
 }
 
-/// Every 15 minutes: if the router serves a newer build signed by the same team, swap the app in place and
+/// Every 15 minutes: if GitHub has a newer release signed by the same team, swap the app in place and
 /// exit; launchd restarts it. Anything else (unsigned, other team, other app) is refused.
 final class Updater {
     let config: Config
@@ -574,7 +514,7 @@ final class Updater {
     }
 
     func check() {
-        guard let mine = installed, let url = URL(string: "\(config.worker)/version.txt") else { return }
+        guard let mine = installed, let url = URL(string: "https://github.com/\(releasesRepo)/releases/latest/download/version.txt") else { return }
         var req = URLRequest(url: url); req.cachePolicy = .reloadIgnoringLocalCacheData
         URLSession.shared.dataTask(with: req) { data, resp, _ in
             guard (resp as? HTTPURLResponse)?.statusCode == 200, let data,
@@ -599,7 +539,8 @@ final class Updater {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("wallpad-update-\(randomString(8))").path
         defer { try? FileManager.default.removeItem(atPath: tmp) }
         log("downloading \(version)")
-        guard sh(#"mkdir -p "$2" && curl -fsSL "$1/wallpad.zip" -o "$2/app.zip" && ditto -x -k "$2/app.zip" "$2/x""#, [config.worker, tmp]),
+        let zip = "https://github.com/\(releasesRepo)/releases/latest/download/Wallpad.zip"
+        guard sh(#"mkdir -p "$2" && curl -fsSL "$1" -o "$2/app.zip" && ditto -x -k "$2/app.zip" "$2/x""#, [zip, tmp]),
               let name = try? FileManager.default.contentsOfDirectory(atPath: tmp + "/x").first(where: { $0.hasSuffix(".app") }) else {
             log("update download failed"); return
         }
@@ -654,18 +595,11 @@ func arg(_ name: String) -> String? { args.firstIndex(of: name).flatMap { $0 + 1
 
 switch args.first {
 case "setup":
-    guard let worker = arg("--router") ?? loadConfig()?.worker ?? bundledRouter else { print("missing --router <url>"); exit(64) }
-    guard let admin = arg("--enroll") ?? arg("--admin-key") else { print("missing --enroll <one-time code> (scripts/install-command.sh makes one)"); exit(64) }
-    let fresh = Config(id: "tv-" + randomString(10), name: Host.current().localizedName ?? "Office TV",
-                       token: randomString(32, "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"), worker: worker)
-    var c = loadConfig() ?? fresh   // re-running setup keeps the id and QR secret, so printed codes keep working
-    if let n = arg("--name") { c.name = n }
-    c.worker = worker
-    guard let key = register(c, adminKey: admin) else { print("couldn't register with \(worker): the code may have expired or been used; make a new one"); exit(1) }
-    c.tvKey = key
-    c.reportKey = nil
+    var c = loadConfig() ?? Config(name: Host.current().localizedName ?? "Office TV",
+                                   token: randomString(32, "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"))
+    if let n = arg("--name") { c.name = n }   // re-running setup keeps the QR secret, so printed codes keep working
     try saveConfig(c)
-    print("configured \(c.name) (\(c.id))")
+    print("configured \(c.name): \(c.qrURL.prefix(while: { $0 != "#" }))")
     print("QR card: \(try writeQRCard(c).path)")
 case "preview-code":   // renders the TV's pairing card to a PNG (for checking the design)
     let v = CodeOverlay.view("4821", tv: "Lobby TV", size: NSSize(width: 1280, height: 720))
@@ -677,18 +611,13 @@ case "qr":
     guard let c = loadConfig() else { print("not set up: run wallpad setup first"); exit(1) }
     print(try writeQRCard(c).path)
 default:
-    guard var c = loadConfig() else { log("not set up: run wallpad setup --name \"Lobby TV\" --enroll <code>"); exit(1) }
-    if c.tvKey == nil, let legacy = c.reportKey {   // older install: trade the shared key for this TV's own
-        if let key = register(c, adminKey: legacy) { c.tvKey = key; c.reportKey = nil; try? saveConfig(c); log("registered with own key") }
-    }
+    guard let c = loadConfig() else { log("not set up: run wallpad setup"); exit(1) }
     // Moving the pointer and typing need Accessibility access (System Settings > Privacy & Security > Accessibility).
     let trusted = Input.dryRun || AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
     if !trusted { log("waiting for Accessibility permission (System Settings > Privacy & Security > Accessibility)") }
     NSApplication.shared.setActivationPolicy(.accessory)   // no Dock icon, but may show the pairing code
     let server = try Server(config: c)
     server.start()
-    let reporter = Reporter(config: c)
-    reporter.start()
     let updater = Updater(config: c)
     updater.start()
     // keep the Mac awake enough to answer (the display can still sleep)
