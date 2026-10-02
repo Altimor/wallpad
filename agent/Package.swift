@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "wallpad",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS(.v12)],
     targets: [
         .executableTarget(name: "wallpad", path: "Sources/wallpad", exclude: ["remote.html"]),
     ]

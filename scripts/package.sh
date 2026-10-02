@@ -27,7 +27,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSUIElement</key><true/>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>WallpadRepo</key><string>$REPO</string>
 </dict></plist>
 PLIST
